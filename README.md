@@ -94,12 +94,13 @@ uvicorn app.main:app --reload
   `POST /me/routes/{route_id}/points`,
   `PATCH/DELETE /me/routes/{route_id}/points/{point_id}`,
   `POST /me/routes/{route_id}/reorder`
-- `journeys` — `POST /journeys/route/{route_id}/start`,
-  `POST /journeys/route/{route_id}/progress`,
-  `POST /journeys/route/{route_id}/complete`
+- `journeys` — `POST /journeys/route/{route_id}/start|progress|complete`,
+  `POST /journeys/experience/{experience_id}/start|progress|complete`
 - `orders` — `POST /orders`, `GET /orders/{order_id}`
 - `payments` — `POST /payments/{order_id}/init`, `POST /payments/webhook`
 - `purchases` — `GET /purchases/experiences/{id}/access`
+- `reviews` — `POST /reviews`
+- `analytics` — `POST /analytics/events`, `GET /analytics/reports/basic`
 
 ## Тестовые пользователи (seed)
 
@@ -384,22 +385,149 @@ curl -s -H "$AUTH" http://127.0.0.1:8000/purchases/experiences/1/access
 6. Повторить webhook с тем же `provider_event_id` → `idempotent: true`,
    PurchaseAccess не дублируется.
 
+## Финальный P0 demo flow
+
+P0 backend demo реализует **оба** пользовательских сценария из ТЗ:
+
+1. **Готовое впечатление**: каталог → карточка → mock-покупка → доступ → прохождение → отзыв.
+2. **Личный маршрут**: создание маршрута → точки → reorder → прохождение → завершение → отзыв.
+
+Backend P0 готов для демонстрации.
+
+### Сценарий 1 — purchased experience flow (полный)
+
+```bash
+# 0. Логин user
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+AUTH="Authorization: Bearer $TOKEN"
+
+# 1. Каталог
+curl -s -H "$AUTH" http://127.0.0.1:8000/catalog/experiences
+
+# 2. Карточка
+curl -s -H "$AUTH" http://127.0.0.1:8000/experiences/1
+
+# 3. Создать заказ
+OID=$(curl -s -X POST http://127.0.0.1:8000/orders \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"experience_id":1}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+# 4. Инициировать mock-платёж
+curl -s -X POST http://127.0.0.1:8000/payments/$OID/init -H "$AUTH"
+
+# 5. Mock webhook (callback провайдера)
+curl -s -X POST http://127.0.0.1:8000/payments/webhook \
+  -H 'Content-Type: application/json' \
+  -H 'X-Mock-Payment-Secret: dev-mock-secret' \
+  -d "{\"order_id\":$OID,\"provider_event_id\":\"evt_demo_p0\",\"status\":\"paid\"}"
+
+# 6. Проверить доступ
+curl -s -H "$AUTH" http://127.0.0.1:8000/purchases/experiences/1/access
+
+# 7. Начать прохождение купленного впечатления
+JID=$(curl -s -X POST http://127.0.0.1:8000/journeys/experience/1/start -H "$AUTH" \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+# 8. Прогресс по точке (point_id из /experiences/1)
+curl -s -X POST http://127.0.0.1:8000/journeys/experience/1/progress \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"point_id":1}'
+
+# 9. Завершить прохождение
+curl -s -X POST http://127.0.0.1:8000/journeys/experience/1/complete -H "$AUTH"
+
+# 10. Отзыв
+curl -s -X POST http://127.0.0.1:8000/reviews \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"target_type\":\"experience\",\"target_id\":1,\"journey_id\":$JID,\"rating\":5,\"text\":\"Отличное впечатление\"}"
+
+# 11. Аналитическое событие
+curl -s -X POST http://127.0.0.1:8000/analytics/events \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"event_name":"catalog_opened","session_id":"session-123","source_app":"mobile","entity_type":"catalog","payload":{"city":"Москва","page":1}}'
+```
+
+### Сценарий 2 — personal route flow (см. этап 3 выше)
+
+Заканчивается отзывом:
+
+```bash
+curl -s -X POST http://127.0.0.1:8000/reviews \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"target_type\":\"route\",\"target_id\":$RID,\"journey_id\":$JID,\"rating\":4,\"text\":\"nice\"}"
+```
+
+### Этап 5: FR-08 для купленных впечатлений, FR-12 Reviews, FR-13 Analytics
+
+Что добавлено:
+
+- **FR-08 (purchased experiences)**: `POST /journeys/experience/{id}/start|progress|complete`.
+  Требует `PurchaseAccess` на experience. Без access → 403, нет experience → 404,
+  experience без точек → 400, complete без started → 400. Прогресс по `point_id`
+  идемпотентен, start идемпотентен для активного started journey.
+- **FR-12 (Reviews)**: `POST /reviews`. Только роль `User`. Один отзыв на один
+  completed journey. Журней должен принадлежать текущему user, быть `completed`,
+  совпадать по `journey_type` и `target_id`. Rating 1..5. Duplicate → 400,
+  чужой journey → 404, target mismatch → 400, не-completed → 400.
+- **FR-13 (Analytics)**: `POST /analytics/events` — single или batch
+  (`{"events":[...]}`). Доступно `User/Author/Moderator`. Без токена → 401.
+  Min-валидация `event_name/session_id/source_app`. Сохраняется в таблицу
+  `analytics_events`. `GET /analytics/reports/basic` — только Moderator,
+  отдаёт `{total_events, events_by_name}`.
+- **FR-14**: добавлены бизнес-логи `experience_journey_started/progress/completed`,
+  `experience_journey_access_denied`, `review_submitted`, `review_rejected_validation`,
+  `analytics_events_accepted`, `analytics_report_opened`.
+- БД: новые миграции не требуются — таблицы `journeys`, `journey_progress`,
+  `reviews`, `analytics_events` уже существуют с этапа 1.
+
+### Как проверить через Swagger
+
+1. `POST /auth/login` (`user@test.com / password`) → копируем `access_token`, Authorize.
+2. `GET /catalog/experiences` → берём `id`.
+3. `POST /orders` `{"experience_id": <id>}` → `order_id`.
+4. `POST /payments/{order_id}/init`.
+5. `POST /payments/webhook` с header `X-Mock-Payment-Secret: dev-mock-secret`
+   и телом `{"order_id":<id>,"provider_event_id":"evt_demo_p0","status":"paid"}`.
+6. `GET /purchases/experiences/{id}/access` → `access_granted: true`.
+7. `POST /journeys/experience/{id}/start` → `journey_id`, `status: started`.
+8. `POST /journeys/experience/{id}/progress` `{"point_id":<pid>}`.
+9. `POST /journeys/experience/{id}/complete` → `status: completed`.
+10. `POST /reviews` `{"target_type":"experience","target_id":<id>,"journey_id":<journey_id>,"rating":5,"text":"..."}`.
+11. `POST /analytics/events` любым событием.
+12. Войти под `moderator@test.com` → `GET /analytics/reports/basic`.
+
 ## FR → статус реализации
 
 | FR    | Область                    | Статус |
 |-------|----------------------------|--------|
-| FR-01 | Auth / RBAC                | **Частично реализовано**: login, JWT, роли User/Author/Moderator, `GET /me`. |
+| FR-01 | Auth / RBAC                | **Реализовано (P0)**: login, JWT, роли User/Author/Moderator, `GET /me`. |
 | FR-02 | Каталог                    | **Реализовано** (этап 2): `GET /catalog/experiences` с фильтрами и пагинацией. |
 | FR-03 | Карточка впечатления       | **Реализовано** (этап 2): `GET /experiences/{id}` с `purchase_available` и точками. |
 | FR-04 | Покупка только published   | **Реализовано** (этап 4, mock-оплата): `POST /orders` отклоняет non-published experience. |
-| FR-05 | Заказы / доступ            | **Реализовано** (этап 4, mock-оплата): создание заказа, статусы `created/pending/paid/failed/refunded`, выдача `PurchaseAccess` только после `paid`. |
-| FR-06 | Идемпотентность webhook    | **Реализовано** (этап 4): отдельная таблица `payment_webhook_events`, идемпотентность по `provider_event_id`. |
-| FR-07 | Личные маршруты            | **Реализовано** (этап 3): CRUD маршрутов и точек, reorder, лимит 30 точек, изоляция по владельцу. |
-| FR-08 | Прохождение (journey)      | **Реализовано для личных маршрутов** (этап 3). Для purchased experience пока не реализовано, запланировано на следующий этап. |
-| FR-09 | Кабинет автора             | Вне P0 до 2 июня. |
-| FR-10 | Модерация                  | Вне P0 до 2 июня. |
-| FR-11 | Жалобы                     | Вне P0 до 2 июня. |
-| FR-12 | Отзывы                     | Модель подготовлена, API запланирован. |
-| FR-13 | Аналитика                  | Модель подготовлена, API запланирован. |
-| FR-14 | Логирование / аудит        | **Расширено** (этап 4): request-логи + бизнес-логи каталога, карточки, маршрутов, journey-событий, а также `order_created`, `payment_initialized`, `payment_webhook_received/idempotent`, `payment_status_changed`, `access_granted`, `access_checked`, `invalid_access_attempt`. |
-| FR-15 | Конфиг каталога            | **Частично реализовано**: серверная сортировка по умолчанию + `GET /catalog/config` отдаёт текущий конфиг. |
+| FR-05 | Заказы / доступ            | **Реализовано** (этап 4, mock-оплата): статусы `created/pending/paid/failed/refunded`, `PurchaseAccess` только после `paid`. |
+| FR-06 | Идемпотентность webhook    | **Реализовано** (этап 4): таблица `payment_webhook_events`, идемпотентность по `provider_event_id`. |
+| FR-07 | Личные маршруты            | **Реализовано** (этап 3): CRUD маршрутов и точек, reorder, лимит 30 точек. |
+| FR-08 | Прохождение (journey)      | **Реализовано для личных маршрутов и купленных впечатлений** (этапы 3 + 5). |
+| FR-09 | Кабинет автора             | Вне P0 demo, future work. |
+| FR-10 | Модерация                  | Вне P0 demo, future work. |
+| FR-11 | Жалобы                     | Вне P0 demo, future work. |
+| FR-12 | Отзывы                     | **Реализовано** (этап 5): `POST /reviews` для experience и route, привязка к completed journey, защита от дублей. |
+| FR-13 | Аналитика                  | **Реализовано** (этап 5): `POST /analytics/events` (single + batch) + `GET /analytics/reports/basic` (Moderator). |
+| FR-14 | Логирование / аудит        | **Расширено** (этап 5): + `experience_journey_*`, `review_submitted/rejected_validation`, `analytics_events_accepted`, `analytics_report_opened`. |
+| FR-15 | Конфиг каталога            | **Частично реализовано**: серверная сортировка + `GET /catalog/config`. |
+
+## Beyond P0 demo (future work)
+
+Эти возможности **не входят** в P0 demo-flow и оставлены как future work:
+
+- FR-09 Author cabinet (создание/редактирование впечатлений автором).
+- FR-10 Moderation (workflow `on_moderation → published/rejected`).
+- FR-11 Complaints (жалобы пользователей).
+- Реальный payment provider (сейчас используется mock).
+- Frontend клиента.
+- ML-рекомендации.
+- Социальные фичи (фолловинг, шеринг и пр.).
