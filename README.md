@@ -1,43 +1,38 @@
 # Travel Experiences Backend
 
-Backend service for a travel "experiences" app (course project):
-catalog of ready-made travel experiences, purchase, guided journey
-progress, and personal routes.
+Бэкенд трэвел-приложения «впечатлений» (курсовой проект):
+каталог готовых впечатлений, покупка, сопровождение прохождения и
+личные маршруты.
 
-This repository contains **Stage 1** of the backend: project skeleton,
-database models, migrations, seed data, authentication/RBAC, Swagger
-and basic tests. Business endpoints (catalog, orders, journeys, etc.)
-will be added in subsequent stages.
-
-## Tech stack
+## Стек
 
 - Python 3.11+
 - FastAPI
 - SQLAlchemy 2.x
 - Alembic
 - Pydantic v2 / pydantic-settings
-- SQLite (local) via `sqlite:///./app.db`
-- JWT auth (`python-jose`), password hashing (`passlib[bcrypt]`)
+- SQLite (локально) через `sqlite:///./app.db`
+- JWT-аутентификация (`python-jose`), хеширование паролей (`bcrypt`)
 - Pytest + httpx (FastAPI `TestClient`)
 
-## Project structure
+## Структура проекта
 
 ```
 app/
-  main.py                FastAPI app, /health, router wiring, request logging
-  api/                   HTTP routers (auth, me)
-  core/                  config, security (JWT, hashing), logging
-  db/                    SQLAlchemy Base, session, seed
-  models/                ORM models (User, Experience, Route, Journey, Order, Review, Analytics)
-  schemas/               Pydantic schemas
-  services/              auth service + RBAC dependencies
-alembic/                 migration environment
-tests/                   pytest tests
+  main.py                FastAPI-приложение, /health, подключение роутеров, request-логирование
+  api/                   HTTP-роутеры (auth, me, catalog, experiences)
+  core/                  конфиг, security (JWT, хеширование), логирование
+  db/                    SQLAlchemy Base, сессия, seed
+  models/                ORM-модели (User, Experience, Route, Journey, Order, Review, Analytics)
+  schemas/               Pydantic-схемы
+  services/              auth-сервис и RBAC-зависимости
+alembic/                 миграции
+tests/                   тесты pytest
 ```
 
-## Setup
+## Установка
 
-### 1. Create a virtual environment and install dependencies
+### 1. Виртуальное окружение и зависимости
 
 ```bash
 python3.11 -m venv .venv
@@ -45,132 +40,192 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Create `.env`
-
-Copy the example file and edit if needed:
+### 2. Конфиг `.env`
 
 ```bash
 cp .env.example .env
 ```
 
-Defaults are fine for local SQLite development.
+Для локальной SQLite дефолтов достаточно.
 
-### 3. Apply migrations
+### 3. Миграции
 
-Create the initial migration (only the first time):
+```bash
+alembic upgrade head
+```
+
+Если миграция ещё не создана:
 
 ```bash
 alembic revision --autogenerate -m "initial"
 alembic upgrade head
 ```
 
-Re-apply later changes with:
+> Можно стартовать и без Alembic — seed-скрипт сам вызовет
+> `Base.metadata.create_all()`.
 
-```bash
-alembic upgrade head
-```
+### 4. Seed
 
-> Note: if you just want to start quickly without Alembic, the seed
-> script will also call `Base.metadata.create_all()` to create tables.
-
-### 4. Seed the database
-
-Idempotent — safe to run multiple times.
+Идемпотентный, безопасно запускать повторно.
 
 ```bash
 python -m app.db.seed
 ```
 
-### 5. Run the backend
+### 5. Запуск
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-### 6. Open Swagger
+### 6. Swagger
 
 - Swagger UI: http://127.0.0.1:8000/docs
 - OpenAPI JSON: http://127.0.0.1:8000/openapi.json
 
-Visible endpoint groups at Stage 1:
+Группы endpoints:
 
 - `health` — `GET /health`
 - `auth` — `POST /auth/login`, `POST /auth/refresh`
 - `me` — `GET /me`
+- `catalog` — `GET /catalog/experiences`, `GET /catalog/config`
+- `experiences` — `GET /experiences/{id}`
 
-## Test users (seeded)
+## Тестовые пользователи (seed)
 
-| Email                 | Password   | Role       |
-|-----------------------|------------|------------|
-| user@test.com         | password   | User       |
-| author@test.com       | password   | Author     |
-| moderator@test.com    | password   | Moderator  |
+| Email              | Пароль   | Роль       |
+|--------------------|----------|------------|
+| user@test.com      | password | User       |
+| author@test.com    | password | Author     |
+| moderator@test.com | password | Moderator  |
 
-Login flow (for Swagger):
-1. `POST /auth/login` with email/password → copy `access_token`.
-2. Click "Authorize" in Swagger and paste the token.
-3. Now `GET /me` and any future protected endpoints will work.
+Логин через Swagger:
+1. `POST /auth/login` с email/паролем → скопировать `access_token`.
+2. Нажать «Authorize» в Swagger и вставить токен.
+3. После этого работают `GET /me` и остальные защищённые endpoints.
 
-## Running tests
+## Запуск тестов
 
 ```bash
 pytest
 ```
 
-Tests use an isolated `test_app.db` SQLite file that is wiped between
-sessions, seeded with the three test users and three Experiences.
+Тесты используют изолированный `test_app.db`, который пересоздаётся
+между сессиями и сидится тремя тестовыми пользователями плюс набором
+впечатлений (published / draft / on_moderation).
 
-## Current implementation status
+## Этап 1: каркас и аутентификация
 
-Stage 1 (this commit) delivers:
-
-- FastAPI app with `/health`, `/docs`, `/openapi.json`.
-- DB models for all entities required by the spec: `User`, `Experience`,
+- FastAPI-приложение с `/health`, `/docs`, `/openapi.json`.
+- ORM-модели всех сущностей из ТЗ: `User`, `Experience`,
   `ExperiencePoint`, `PersonalRoute`, `RoutePoint`, `Journey`,
   `JourneyProgress`, `Order`, `PurchaseAccess`, `Review`,
   `AnalyticsEvent`.
-- Alembic environment configured against the same metadata.
-- Idempotent seed script with 3 users + 3 published experiences (each
-  with ≥ 2 `ExperiencePoint`).
-- Auth/RBAC: password hashing (bcrypt), JWT access token, `POST
-  /auth/login`, `POST /auth/refresh`, `GET /me`. Roles
-  `User / Author / Moderator` are stored on the backend and cannot be
-  set by the client. A `require_roles(...)` dependency is ready for
-  future protected endpoints.
-- Request logging middleware (method, path, status_code, latency_ms).
-- Pytest suite covering health, login, /me, wrong password, missing token.
+- Alembic-окружение, подключённое к той же метадате.
+- Идемпотентный seed-скрипт.
+- Auth/RBAC: хеширование паролей через `bcrypt`, JWT access-token,
+  `POST /auth/login`, `POST /auth/refresh`, `GET /me`. Роли
+  `User / Author / Moderator` хранятся на бэкенде и не задаются
+  клиентом. Готова зависимость `require_roles(...)` для будущих
+  защищённых endpoints.
+- Middleware request-логирования (method, path, status_code, latency_ms).
 
-## MVP simplifications (Stage 1)
+### Упрощения этапа 1 (MVP)
 
-These shortcuts are intentional and will be revisited in later stages:
+- `POST /auth/refresh` принимает действующий **access**-токен и
+  выдаёт новый access (без отдельного refresh-хранилища).
+- Один тип access-токена, без revocation-list.
+- `AnalyticsEvent.payload` хранится как текст (JSON-строка), без
+  нативного JSON-типа — для портативности SQLite.
+- `JourneyProgress.point_id` и `Journey.target_id` — обычные
+  integer-поля без FK, потому что `journey_type` полиморфно ссылается
+  на `ExperiencePoint` либо `RoutePoint`.
 
-- `POST /auth/refresh` accepts a currently valid **access** token and
-  issues a new access token (no separate refresh-token store yet).
-- Single access-token type, no token revocation list.
-- `AnalyticsEvent.payload` is stored as text (JSON-encoded in app code)
-  rather than a native JSON column, for portability on SQLite.
-- `JourneyProgress.point_id` is a plain integer (no FK) because
-  journeys can point at either `ExperiencePoint` or `RoutePoint`
-  depending on `journey_type`.
-- `Journey.target_id` is a plain integer for the same polymorphic
-  reason (kept simple at this stage).
+## Этап 2: каталог и карточка впечатления
 
-## FR → implementation status
+Что добавлено:
 
-| FR    | Area                       | Stage 1 status |
-|-------|----------------------------|----------------|
-| FR-01 | Auth / RBAC                | **Partially implemented**: login, JWT auth, roles User/Author/Moderator, `GET /me`. |
-| FR-02 | Catalog                    | Not implemented at Stage 1, planned for Stage 2. |
-| FR-03 | Experience card            | Not implemented at Stage 1, planned for Stage 2. |
-| FR-04 | Purchase published only    | Not implemented at Stage 1, planned for the mock-payment stage. |
-| FR-05 | Orders / access            | Not implemented at Stage 1, planned for the mock-payment stage. |
-| FR-06 | Webhook idempotency        | Not implemented at Stage 1, planned for the mock-payment stage. |
-| FR-07 | Personal routes            | Models prepared; API planned for Stage 3. |
-| FR-08 | Journey progress           | Models prepared; API planned for Stage 3. |
-| FR-09 | Author cabinet             | Out of P0 scope until 2 June. |
-| FR-10 | Moderation                 | Out of P0 scope until 2 June. |
-| FR-11 | Complaints                 | Out of P0 scope until 2 June. |
-| FR-12 | Reviews                    | Model prepared; API planned for the next stage. |
-| FR-13 | Analytics                  | Model prepared; API planned for the next stage. |
-| FR-14 | Logging / audit            | Basic request logging implemented. |
-| FR-15 | Catalog config             | Not implemented at Stage 1, planned as backend default sorting. |
+- `GET /catalog/experiences` — пагинированный каталог только
+  **published**-впечатлений с фильтрами `city`,
+  `min_duration_minutes`, `max_duration_minutes`, `min_price`,
+  `max_price`, `page` (≥ 1), `size` (1–50). Серверная сортировка:
+  `city ASC, duration_minutes ASC, id ASC`. Клиентский `sort` не
+  принимается.
+- `GET /experiences/{id}` — карточка впечатления с заголовком,
+  описаниями, городом, длительностью, ценой, ограничениями,
+  статусом, точками в порядке `order ASC` и вычисляемым флагом
+  `purchase_available: bool` (true только если
+  `status == "published"`).
+- `GET /catalog/config` — диагностический endpoint, отдающий
+  текущий backend-конфиг каталога: `default_sort`, `max_page_size`,
+  `source`.
+- Правила видимости non-published впечатлений (draft /
+  on_moderation / rejected):
+  - User → 404 (факт существования не раскрывается).
+  - Author → 200 только для своих
+    (`experience.author_id == current_user.id`), иначе 404.
+  - Moderator → 200 для любого non-published.
+- Бизнес-логирование запросов каталога (фильтры, page, size, total,
+  returned) и карточки (`experience_id`, `experience_status`,
+  `purchase_available`).
+- Seed расширен: добавлены draft и on_moderation впечатления,
+  принадлежащие `author@test.com`, для проверки видимости.
+
+### Примеры curl
+
+Логин и сохранение токена:
+
+```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+```
+
+Каталог (только published):
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/catalog/experiences
+```
+
+Каталог с фильтром по городу:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  "http://127.0.0.1:8000/catalog/experiences?city=%D0%9C%D0%BE%D1%81%D0%BA%D0%B2%D0%B0&page=1&size=10"
+```
+
+Карточка впечатления:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/experiences/1
+```
+
+Конфиг каталога:
+
+```bash
+curl -s -H "Authorization: Bearer $TOKEN" \
+  http://127.0.0.1:8000/catalog/config
+```
+
+## FR → статус реализации
+
+| FR    | Область                    | Статус |
+|-------|----------------------------|--------|
+| FR-01 | Auth / RBAC                | **Частично реализовано**: login, JWT, роли User/Author/Moderator, `GET /me`. |
+| FR-02 | Каталог                    | **Реализовано** (этап 2): `GET /catalog/experiences` с фильтрами и пагинацией. |
+| FR-03 | Карточка впечатления       | **Реализовано** (этап 2): `GET /experiences/{id}` с `purchase_available` и точками. |
+| FR-04 | Покупка только published   | Не реализовано, запланировано на этап mock-платежей. |
+| FR-05 | Заказы / доступ            | Не реализовано, запланировано на этап mock-платежей. |
+| FR-06 | Идемпотентность webhook    | Не реализовано, запланировано на этап mock-платежей. |
+| FR-07 | Личные маршруты            | Модели подготовлены, API запланирован. |
+| FR-08 | Прохождение (journey)      | Модели подготовлены, API запланирован. |
+| FR-09 | Кабинет автора             | Вне P0 до 2 июня. |
+| FR-10 | Модерация                  | Вне P0 до 2 июня. |
+| FR-11 | Жалобы                     | Вне P0 до 2 июня. |
+| FR-12 | Отзывы                     | Модель подготовлена, API запланирован. |
+| FR-13 | Аналитика                  | Модель подготовлена, API запланирован. |
+| FR-14 | Логирование / аудит        | Базовое request-логирование + бизнес-логи каталога и карточки. |
+| FR-15 | Конфиг каталога            | **Частично реализовано**: серверная сортировка по умолчанию + `GET /catalog/config` отдаёт текущий конфиг. |
