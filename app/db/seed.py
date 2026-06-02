@@ -17,7 +17,7 @@ SEED_USERS = [
 ]
 
 
-SEED_EXPERIENCES = [
+SEED_EXPERIENCES: list[dict] = [
     {
         "title": "Прогулка по историческому центру Москвы",
         "short_description": "Пешеходный маршрут по историческим улицам центра Москвы.",
@@ -75,6 +75,46 @@ SEED_EXPERIENCES = [
 ]
 
 
+SEED_NON_PUBLISHED_EXPERIENCES: list[dict] = [
+    {
+        "title": "Черновик: ночная Москва",
+        "short_description": "Черновой маршрут по ночной Москве.",
+        "full_description": "Черновик впечатления, ещё не опубликован.",
+        "city": "Москва",
+        "duration_minutes": 180,
+        "price": 2000.0,
+        "restrictions": "Только для совершеннолетних.",
+        "status": ExperienceStatus.draft,
+        "points": [
+            {"order": 1, "title": "Площадь Революции",
+             "description": "Старт ночного маршрута.",
+             "lat": 55.7563, "lon": 37.6210},
+            {"order": 2, "title": "Воробьёвы горы",
+             "description": "Финальная смотровая площадка.",
+             "lat": 55.7100, "lon": 37.5430},
+        ],
+    },
+    {
+        "title": "На модерации: парки Санкт-Петербурга",
+        "short_description": "Маршрут по паркам, ожидает модерации.",
+        "full_description": "Впечатление подано на модерацию.",
+        "city": "Санкт-Петербург",
+        "duration_minutes": 240,
+        "price": 1700.0,
+        "restrictions": "Сезонно: апрель–октябрь.",
+        "status": ExperienceStatus.on_moderation,
+        "points": [
+            {"order": 1, "title": "Летний сад",
+             "description": "Старт в Летнем саду.",
+             "lat": 59.9450, "lon": 30.3367},
+            {"order": 2, "title": "Михайловский сад",
+             "description": "Вторая остановка.",
+             "lat": 59.9402, "lon": 30.3360},
+        ],
+    },
+]
+
+
 def seed_users(db: Session) -> dict[str, User]:
     created: dict[str, User] = {}
     for data in SEED_USERS:
@@ -92,39 +132,45 @@ def seed_users(db: Session) -> dict[str, User]:
     return created
 
 
+def _create_experience(db: Session, author: User, data: dict, default_status: ExperienceStatus) -> None:
+    existing = (
+        db.query(Experience)
+        .filter(Experience.title == data["title"], Experience.city == data["city"])
+        .first()
+    )
+    if existing is not None:
+        return
+    exp = Experience(
+        author_id=author.id,
+        title=data["title"],
+        short_description=data["short_description"],
+        full_description=data["full_description"],
+        city=data["city"],
+        duration_minutes=data["duration_minutes"],
+        price=data["price"],
+        restrictions=data["restrictions"],
+        status=data.get("status", default_status),
+    )
+    db.add(exp)
+    db.flush()
+    for p in data["points"]:
+        db.add(
+            ExperiencePoint(
+                experience_id=exp.id,
+                order=p["order"],
+                title=p["title"],
+                description=p["description"],
+                lat=p["lat"],
+                lon=p["lon"],
+            )
+        )
+
+
 def seed_experiences(db: Session, author: User) -> None:
     for data in SEED_EXPERIENCES:
-        existing = (
-            db.query(Experience)
-            .filter(Experience.title == data["title"], Experience.city == data["city"])
-            .first()
-        )
-        if existing is not None:
-            continue
-        exp = Experience(
-            author_id=author.id,
-            title=data["title"],
-            short_description=data["short_description"],
-            full_description=data["full_description"],
-            city=data["city"],
-            duration_minutes=data["duration_minutes"],
-            price=data["price"],
-            restrictions=data["restrictions"],
-            status=ExperienceStatus.published,
-        )
-        db.add(exp)
-        db.flush()
-        for p in data["points"]:
-            db.add(
-                ExperiencePoint(
-                    experience_id=exp.id,
-                    order=p["order"],
-                    title=p["title"],
-                    description=p["description"],
-                    lat=p["lat"],
-                    lon=p["lon"],
-                )
-            )
+        _create_experience(db, author, data, ExperienceStatus.published)
+    for data in SEED_NON_PUBLISHED_EXPERIENCES:
+        _create_experience(db, author, data, ExperienceStatus.draft)
 
 
 def run_seed() -> None:
