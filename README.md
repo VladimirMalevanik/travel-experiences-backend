@@ -20,12 +20,12 @@
 ```
 app/
   main.py                FastAPI-приложение, /health, подключение роутеров, request-логирование
-  api/                   HTTP-роутеры (auth, me, catalog, experiences, routes, journeys)
+  api/                   HTTP-роутеры (auth, me, catalog, experiences, routes, journeys, orders, payments, purchases)
   core/                  конфиг, security (JWT, хеширование), логирование
   db/                    SQLAlchemy Base, сессия, seed
-  models/                ORM-модели (User, Experience, Route, Journey, Order, Review, Analytics)
+  models/                ORM-модели (User, Experience, Route, Journey, Order, PurchaseAccess, PaymentWebhookEvent, Review, Analytics)
   schemas/               Pydantic-схемы
-  services/              auth-сервис и RBAC-зависимости
+  services/              auth-сервис, RBAC-зависимости, payments-сервис (статусы заказов и webhook)
 alembic/                 миграции
 tests/                   тесты pytest
 ```
@@ -97,6 +97,9 @@ uvicorn app.main:app --reload
 - `journeys` — `POST /journeys/route/{route_id}/start`,
   `POST /journeys/route/{route_id}/progress`,
   `POST /journeys/route/{route_id}/complete`
+- `orders` — `POST /orders`, `GET /orders/{order_id}`
+- `payments` — `POST /payments/{order_id}/init`, `POST /payments/webhook`
+- `purchases` — `GET /purchases/experiences/{id}/access`
 
 ## Тестовые пользователи (seed)
 
@@ -281,6 +284,106 @@ curl -s -X POST http://127.0.0.1:8000/journeys/route/$RID/progress \
 curl -s -X POST http://127.0.0.1:8000/journeys/route/$RID/complete -H "$AUTH"
 ```
 
+## Этап 4: Заказы, mock-оплата и доступ к купленному впечатлению
+
+Что добавлено:
+
+- `POST /orders` (User only) — создать заказ на **published**-впечатление.
+  - Если `experience` не существует → `404`.
+  - Если `experience.status != "published"` → `400`.
+  - Author/Moderator → `403`.
+  - Заказ создаётся со `status = created`, без выдачи `PurchaseAccess`.
+- `GET /orders/{order_id}` (User only) — получить **свой** заказ.
+  - Чужой или несуществующий заказ → `404` (факт существования не раскрывается).
+  - Author/Moderator → `403`.
+- `POST /payments/{order_id}/init` (User only) — инициировать mock-оплату.
+  - `created → pending`, возвращает `payment_url` (mock).
+  - Если уже `pending` — идемпотентный ответ (тот же state).
+  - Если `paid` → `400 order already paid`.
+  - Если `failed/refunded` → `400 payment cannot be initialized`.
+  - Чужой / несуществующий order → `404`.
+- `POST /payments/webhook` — приём webhook от mock-провайдера.
+  - Защищён заголовком `X-Mock-Payment-Secret` (значение из env
+    `MOCK_PAYMENT_WEBHOOK_SECRET`, дефолт `dev-mock-secret`). Без/неверный
+    секрет → `401`.
+  - Тело: `{ order_id, provider_event_id, status }`, где `status ∈ {paid, failed}`.
+  - **Идемпотентность по `provider_event_id`** реализована через таблицу
+    `payment_webhook_events`: повторный event с тем же `provider_event_id`
+    не меняет финальный статус и не создаёт повторного `PurchaseAccess`.
+    В ответе `idempotent: true`.
+  - `status = paid`, текущий статус `created/pending` → переводит в `paid`
+    и создаёт `PurchaseAccess(user_id, experience_id, order_id)`.
+  - `status = failed`, текущий статус `created/pending` → переводит в `failed`,
+    access не создаётся.
+  - Любой другой переход (например, новый event `failed` на уже `paid` order)
+    → `400 invalid status transition`.
+  - Неизвестный `order_id` → `404`.
+- `GET /purchases/experiences/{id}/access` (User only) — проверить доступ к
+  материалам впечатления. Возвращает `access_granted` плюс `order_id`/
+  `granted_at`, либо `null`-значения, если доступа нет.
+- Разрешённые переходы статусов заказа:
+  - `created → pending | paid | failed`
+  - `pending → paid | failed`
+  - `paid → refunded`
+  - Любые переходы назад в `created`, `paid → pending`, `failed → paid`
+    и т.п. — запрещены.
+- Бизнес-логи: `order_created`, `payment_initialized`,
+  `payment_webhook_received`, `payment_webhook_idempotent`,
+  `payment_status_changed`, `access_granted`, `access_checked`,
+  `invalid_access_attempt` (попытка обращения к чужому заказу).
+  Секреты и токены не логируются.
+- Alembic: добавлена миграция `8a3f1c2b9e21_add_payment_webhook_events` —
+  новая таблица `payment_webhook_events` с уникальным
+  `provider_event_id`. Initial migration не переписана.
+
+> **В MVP используется mock payment provider. Реальная внешняя
+> платежная интеграция не входит в текущий этап реализации.**
+
+### Demo flow (этап 4)
+
+```bash
+# 1. Логин
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+AUTH="Authorization: Bearer $TOKEN"
+
+# 2. Каталог
+curl -s -H "$AUTH" http://127.0.0.1:8000/catalog/experiences
+
+# 3. Создать заказ
+OID=$(curl -s -X POST http://127.0.0.1:8000/orders \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"experience_id":1}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+# 4. Инициировать платёж
+curl -s -X POST http://127.0.0.1:8000/payments/$OID/init -H "$AUTH"
+
+# 5. Webhook (имитация callback от провайдера)
+curl -s -X POST http://127.0.0.1:8000/payments/webhook \
+  -H 'Content-Type: application/json' \
+  -H 'X-Mock-Payment-Secret: dev-mock-secret' \
+  -d "{\"order_id\":$OID,\"provider_event_id\":\"evt_demo_1\",\"status\":\"paid\"}"
+
+# 6. Проверить доступ
+curl -s -H "$AUTH" http://127.0.0.1:8000/purchases/experiences/1/access
+```
+
+### Как проверить через Swagger
+
+1. `POST /auth/login` с `user@test.com / password` → скопировать
+   `access_token`, нажать **Authorize**.
+2. `POST /orders` с `{"experience_id": 1}` → получить `id` заказа.
+3. `POST /payments/{order_id}/init` → статус становится `pending`.
+4. `POST /payments/webhook`: в Swagger вставить header
+   `X-Mock-Payment-Secret: dev-mock-secret`, тело —
+   `{"order_id": <id>, "provider_event_id": "evt_demo_1", "status": "paid"}`.
+5. `GET /purchases/experiences/1/access` → `access_granted: true`.
+6. Повторить webhook с тем же `provider_event_id` → `idempotent: true`,
+   PurchaseAccess не дублируется.
+
 ## FR → статус реализации
 
 | FR    | Область                    | Статус |
@@ -288,15 +391,15 @@ curl -s -X POST http://127.0.0.1:8000/journeys/route/$RID/complete -H "$AUTH"
 | FR-01 | Auth / RBAC                | **Частично реализовано**: login, JWT, роли User/Author/Moderator, `GET /me`. |
 | FR-02 | Каталог                    | **Реализовано** (этап 2): `GET /catalog/experiences` с фильтрами и пагинацией. |
 | FR-03 | Карточка впечатления       | **Реализовано** (этап 2): `GET /experiences/{id}` с `purchase_available` и точками. |
-| FR-04 | Покупка только published   | Не реализовано, запланировано на этап mock-платежей. |
-| FR-05 | Заказы / доступ            | Не реализовано, запланировано на этап mock-платежей. |
-| FR-06 | Идемпотентность webhook    | Не реализовано, запланировано на этап mock-платежей. |
+| FR-04 | Покупка только published   | **Реализовано** (этап 4, mock-оплата): `POST /orders` отклоняет non-published experience. |
+| FR-05 | Заказы / доступ            | **Реализовано** (этап 4, mock-оплата): создание заказа, статусы `created/pending/paid/failed/refunded`, выдача `PurchaseAccess` только после `paid`. |
+| FR-06 | Идемпотентность webhook    | **Реализовано** (этап 4): отдельная таблица `payment_webhook_events`, идемпотентность по `provider_event_id`. |
 | FR-07 | Личные маршруты            | **Реализовано** (этап 3): CRUD маршрутов и точек, reorder, лимит 30 точек, изоляция по владельцу. |
-| FR-08 | Прохождение (journey)      | **Реализовано для личных маршрутов** (этап 3): start/progress/complete, восстановление прогресса. Для purchased experience запланировано после mock-платежей. |
+| FR-08 | Прохождение (journey)      | **Реализовано для личных маршрутов** (этап 3). Для purchased experience пока не реализовано, запланировано на следующий этап. |
 | FR-09 | Кабинет автора             | Вне P0 до 2 июня. |
 | FR-10 | Модерация                  | Вне P0 до 2 июня. |
 | FR-11 | Жалобы                     | Вне P0 до 2 июня. |
 | FR-12 | Отзывы                     | Модель подготовлена, API запланирован. |
 | FR-13 | Аналитика                  | Модель подготовлена, API запланирован. |
-| FR-14 | Логирование / аудит        | **Расширено** (этап 3): request-логирование + бизнес-логи каталога, карточки, CRUD маршрутов и journey-событий. |
+| FR-14 | Логирование / аудит        | **Расширено** (этап 4): request-логи + бизнес-логи каталога, карточки, маршрутов, journey-событий, а также `order_created`, `payment_initialized`, `payment_webhook_received/idempotent`, `payment_status_changed`, `access_granted`, `access_checked`, `invalid_access_attempt`. |
 | FR-15 | Конфиг каталога            | **Частично реализовано**: серверная сортировка по умолчанию + `GET /catalog/config` отдаёт текущий конфиг. |
