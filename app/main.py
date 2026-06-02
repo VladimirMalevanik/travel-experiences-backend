@@ -3,7 +3,9 @@ from fastapi import FastAPI
 from app.api.auth import router as auth_router
 from app.api.catalog import router as catalog_router
 from app.api.experiences import router as experiences_router
+from app.api.journeys import router as journeys_router
 from app.api.me import router as me_router
+from app.api.routes import router as routes_router
 from app.core.config import settings
 from app.core.logging import RequestLoggingMiddleware, configure_logging
 
@@ -31,3 +33,5 @@ app.include_router(auth_router)
 app.include_router(me_router)
 app.include_router(catalog_router)
 app.include_router(experiences_router)
+app.include_router(routes_router)
+app.include_router(journeys_router)

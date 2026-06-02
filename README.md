@@ -20,7 +20,7 @@
 ```
 app/
   main.py                FastAPI-приложение, /health, подключение роутеров, request-логирование
-  api/                   HTTP-роутеры (auth, me, catalog, experiences)
+  api/                   HTTP-роутеры (auth, me, catalog, experiences, routes, journeys)
   core/                  конфиг, security (JWT, хеширование), логирование
   db/                    SQLAlchemy Base, сессия, seed
   models/                ORM-модели (User, Experience, Route, Journey, Order, Review, Analytics)
@@ -90,6 +90,13 @@ uvicorn app.main:app --reload
 - `me` — `GET /me`
 - `catalog` — `GET /catalog/experiences`, `GET /catalog/config`
 - `experiences` — `GET /experiences/{id}`
+- `routes` — `GET/POST /me/routes`, `GET/PATCH/DELETE /me/routes/{route_id}`,
+  `POST /me/routes/{route_id}/points`,
+  `PATCH/DELETE /me/routes/{route_id}/points/{point_id}`,
+  `POST /me/routes/{route_id}/reorder`
+- `journeys` — `POST /journeys/route/{route_id}/start`,
+  `POST /journeys/route/{route_id}/progress`,
+  `POST /journeys/route/{route_id}/complete`
 
 ## Тестовые пользователи (seed)
 
@@ -210,6 +217,70 @@ curl -s -H "Authorization: Bearer $TOKEN" \
   http://127.0.0.1:8000/catalog/config
 ```
 
+## Этап 3: Личные маршруты и прохождение личного маршрута
+
+Что добавлено:
+
+- Личные маршруты пользователя (роль `User`):
+  - `GET /me/routes` — список своих маршрутов (sort: `updated_at DESC, id DESC`), с `points_count`.
+  - `POST /me/routes` — создать маршрут (`name`, статус по умолчанию `draft`).
+  - `GET /me/routes/{route_id}` — детали своего маршрута с точками, отсортированными по `order ASC`.
+  - `PATCH /me/routes/{route_id}` — редактировать `name` и/или `status`.
+  - `DELETE /me/routes/{route_id}` — удалить маршрут вместе с точками (204).
+  - `POST /me/routes/{route_id}/points` — добавить точку. Если `order` не передан — `max(order)+1`. Лимит MVP: 30 точек на маршрут (иначе 400).
+  - `PATCH /me/routes/{route_id}/points/{point_id}` — редактировать точку (`title`, `note`, `lat`, `lon`, `order`).
+  - `DELETE /me/routes/{route_id}/points/{point_id}` — удалить точку (204).
+  - `POST /me/routes/{route_id}/reorder` — пересортировка по списку `point_ids`. Список должен содержать **ровно все** существующие `id` точек маршрута без дублей и чужих — иначе 400. После reorder `order` выставляется с 1.
+- Прохождение личного маршрута (роль `User`):
+  - `POST /journeys/route/{route_id}/start` — начать прохождение. Если маршрут без точек → 400. Если уже есть `started` journey по этому маршруту — возвращается он же, без дубля. Если есть `completed` journey, новый `started` создать можно.
+  - `POST /journeys/route/{route_id}/progress` — отметить прохождение точки. `point_id` должен принадлежать маршруту. Должен существовать `started` journey, иначе 400. Повторный progress по той же точке идемпотентен — дубль не создаётся.
+  - `POST /journeys/route/{route_id}/complete` — завершить прохождение. Требуется `started` journey, иначе 400. Повторный `complete` для уже завершённого journey возвращает **400** (выбран явный конфликт состояния).
+- RBAC: все эндпоинты `/me/routes/*` и `/journeys/route/*` доступны только роли `User`. Author/Moderator получают `403`. Чужие маршруты для User скрываются как `404` (факт существования не раскрывается).
+- Бизнес-логирование: `route_created`, `route_updated`, `route_deleted`, `route_point_added/updated/deleted`, `route_reordered`, `route_journey_started/progress/completed`. Без токенов, паролей и чувствительных заметок.
+- БД: новые миграции не требуются — модели `PersonalRoute`, `RoutePoint`, `Journey`, `JourneyProgress` уже существуют с этапа 1.
+
+### Demo flow
+
+```bash
+# 1. Логин
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+AUTH="Authorization: Bearer $TOKEN"
+
+# 2. Создать маршрут
+RID=$(curl -s -X POST http://127.0.0.1:8000/me/routes \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"name":"Weekend"}' | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+# 3. Добавить точки
+P1=$(curl -s -X POST http://127.0.0.1:8000/me/routes/$RID/points \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"title":"Старт","lat":55.75,"lon":37.62}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+P2=$(curl -s -X POST http://127.0.0.1:8000/me/routes/$RID/points \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d '{"title":"Финиш","lat":55.76,"lon":37.60}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+# 4. Reorder
+curl -s -X POST http://127.0.0.1:8000/me/routes/$RID/reorder \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"point_ids\":[$P2,$P1]}"
+
+# 5. Start journey
+curl -s -X POST http://127.0.0.1:8000/journeys/route/$RID/start -H "$AUTH"
+
+# 6. Progress
+curl -s -X POST http://127.0.0.1:8000/journeys/route/$RID/progress \
+  -H "$AUTH" -H 'Content-Type: application/json' \
+  -d "{\"point_id\":$P1}"
+
+# 7. Complete
+curl -s -X POST http://127.0.0.1:8000/journeys/route/$RID/complete -H "$AUTH"
+```
+
 ## FR → статус реализации
 
 | FR    | Область                    | Статус |
@@ -220,12 +291,12 @@ curl -s -H "Authorization: Bearer $TOKEN" \
 | FR-04 | Покупка только published   | Не реализовано, запланировано на этап mock-платежей. |
 | FR-05 | Заказы / доступ            | Не реализовано, запланировано на этап mock-платежей. |
 | FR-06 | Идемпотентность webhook    | Не реализовано, запланировано на этап mock-платежей. |
-| FR-07 | Личные маршруты            | Модели подготовлены, API запланирован. |
-| FR-08 | Прохождение (journey)      | Модели подготовлены, API запланирован. |
+| FR-07 | Личные маршруты            | **Реализовано** (этап 3): CRUD маршрутов и точек, reorder, лимит 30 точек, изоляция по владельцу. |
+| FR-08 | Прохождение (journey)      | **Реализовано для личных маршрутов** (этап 3): start/progress/complete, восстановление прогресса. Для purchased experience запланировано после mock-платежей. |
 | FR-09 | Кабинет автора             | Вне P0 до 2 июня. |
 | FR-10 | Модерация                  | Вне P0 до 2 июня. |
 | FR-11 | Жалобы                     | Вне P0 до 2 июня. |
 | FR-12 | Отзывы                     | Модель подготовлена, API запланирован. |
 | FR-13 | Аналитика                  | Модель подготовлена, API запланирован. |
-| FR-14 | Логирование / аудит        | Базовое request-логирование + бизнес-логи каталога и карточки. |
+| FR-14 | Логирование / аудит        | **Расширено** (этап 3): request-логирование + бизнес-логи каталога, карточки, CRUD маршрутов и journey-событий. |
 | FR-15 | Конфиг каталога            | **Частично реализовано**: серверная сортировка по умолчанию + `GET /catalog/config` отдаёт текущий конфиг. |
