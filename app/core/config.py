@@ -12,6 +12,9 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60
     ALGORITHM: str = "HS256"
 
+    MOCK_PAYMENT_WEBHOOK_SECRET: str = "dev-mock-secret"
+    MOCK_PAYMENT_BASE_URL: str = "https://mock-payments.local/pay"
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 

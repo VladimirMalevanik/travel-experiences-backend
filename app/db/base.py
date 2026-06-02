@@ -5,5 +5,6 @@ from app.models.experience import Experience, ExperiencePoint  # noqa: F401
 from app.models.route import PersonalRoute, RoutePoint  # noqa: F401
 from app.models.journey import Journey, JourneyProgress  # noqa: F401
 from app.models.order import Order, PurchaseAccess  # noqa: F401
+from app.models.payment import PaymentWebhookEvent  # noqa: F401
 from app.models.review import Review  # noqa: F401
 from app.models.analytics import AnalyticsEvent  # noqa: F401
