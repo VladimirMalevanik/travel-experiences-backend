@@ -112,6 +112,26 @@ SEED_NON_PUBLISHED_EXPERIENCES: list[dict] = [
              "lat": 59.9402, "lon": 30.3360},
         ],
     },
+    {
+        "title": "Отклонено: подземный квест",
+        "short_description": "Маршрут отклонён модератором.",
+        "full_description": "Впечатление отклонено и требует доработки автором.",
+        "city": "Москва",
+        "duration_minutes": 200,
+        "price": 2500.0,
+        "restrictions": "Требует доработки описания.",
+        "status": ExperienceStatus.rejected,
+        "moderation_reason_code": "content_quality",
+        "moderation_reason_text": "Недостаточно подробное описание маршрута.",
+        "points": [
+            {"order": 1, "title": "Старая площадь",
+             "description": "Точка старта квеста.",
+             "lat": 55.7558, "lon": 37.6324},
+            {"order": 2, "title": "Китай-город",
+             "description": "Вторая точка квеста.",
+             "lat": 55.7547, "lon": 37.6320},
+        ],
+    },
 ]
 
 
@@ -150,6 +170,8 @@ def _create_experience(db: Session, author: User, data: dict, default_status: Ex
         price=data["price"],
         restrictions=data["restrictions"],
         status=data.get("status", default_status),
+        moderation_reason_code=data.get("moderation_reason_code"),
+        moderation_reason_text=data.get("moderation_reason_text"),
     )
     db.add(exp)
     db.flush()

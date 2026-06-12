@@ -101,6 +101,15 @@ uvicorn app.main:app --reload
 - `purchases` — `GET /purchases/experiences/{id}/access`
 - `reviews` — `POST /reviews`
 - `analytics` — `POST /analytics/events`, `GET /analytics/reports/basic`
+- `author` — `GET/POST /author/experiences`,
+  `GET/PATCH /author/experiences/{id}`,
+  `POST /author/experiences/{id}/submit`
+- `moderation` — `GET /moderation/queue`,
+  `POST /moderation/experiences/{id}/publish`,
+  `POST /moderation/experiences/{id}/reject`,
+  `GET /moderation/complaints`,
+  `POST /moderation/complaints/{id}/resolve`
+- `complaints` — `POST /complaints`
 
 ## Тестовые пользователи (seed)
 
@@ -512,22 +521,141 @@ curl -s -X POST http://127.0.0.1:8000/reviews \
 | FR-06 | Идемпотентность webhook    | **Реализовано** (этап 4): таблица `payment_webhook_events`, идемпотентность по `provider_event_id`. |
 | FR-07 | Личные маршруты            | **Реализовано** (этап 3): CRUD маршрутов и точек, reorder, лимит 30 точек. |
 | FR-08 | Прохождение (journey)      | **Реализовано для личных маршрутов и купленных впечатлений** (этапы 3 + 5). |
-| FR-09 | Кабинет автора             | Вне P0 demo, future work. |
-| FR-10 | Модерация                  | Вне P0 demo, future work. |
-| FR-11 | Жалобы                     | Вне P0 demo, future work. |
+| FR-09 | Кабинет автора             | **Реализовано** (Full TZ): `GET/POST /author/experiences`, `GET/PATCH /author/experiences/{id}`, `POST /author/experiences/{id}/submit`. |
+| FR-10 | Модерация                  | **Реализовано** (Full TZ): `GET /moderation/queue`, publish/reject, таблица `moderation_decisions`. |
+| FR-11 | Жалобы                     | **Реализовано** (Full TZ): `POST /complaints`, `GET /moderation/complaints`, resolve. |
 | FR-12 | Отзывы                     | **Реализовано** (этап 5): `POST /reviews` для experience и route, привязка к completed journey, защита от дублей. |
 | FR-13 | Аналитика                  | **Реализовано** (этап 5): `POST /analytics/events` (single + batch) + `GET /analytics/reports/basic` (Moderator). |
-| FR-14 | Логирование / аудит        | **Расширено** (этап 5): + `experience_journey_*`, `review_submitted/rejected_validation`, `analytics_events_accepted`, `analytics_report_opened`. |
-| FR-15 | Конфиг каталога            | **Частично реализовано**: серверная сортировка + `GET /catalog/config`. |
+| FR-14 | Логирование / аудит        | **Реализовано** (Full TZ): модель `AuditLog` + `app/services/audit.py`, аудит publish/reject, complaint_created/resolved, author-сценарии. Без JWT/паролей/чувствительных заметок. |
+| FR-15 | Конфиг каталога            | **Реализовано** (Full TZ): серверная сортировка + расширенный `GET /catalog/config` (`priority_rules`/`showcase_priorities`, `supported_filters`, `version`, окно `time_window_hours` 2–6 ч). |
 
-## Beyond P0 demo (future work)
+## Full TZ compliance stage
 
-Эти возможности **не входят** в P0 demo-flow и оставлены как future work:
+Этап доводит backend до полного соответствия ТЗ: добавлены кабинет автора
+(FR-09), модерация (FR-10), жалобы (FR-11), аудит (FR-14) и расширенный
+конфиг каталога (FR-15).
 
-- FR-09 Author cabinet (создание/редактирование впечатлений автором).
-- FR-10 Moderation (workflow `on_moderation → published/rejected`).
-- FR-11 Complaints (жалобы пользователей).
+### Новые endpoints
+
+- **Author (роль Author)**:
+  - `GET /author/experiences` — список своих впечатлений.
+  - `POST /author/experiences` — создать `draft` (`author_id = current_user`).
+  - `GET /author/experiences/{id}` — своё впечатление (чужое → 404).
+  - `PATCH /author/experiences/{id}` — править только свои `draft`/`rejected`
+    (включая полную замену набора точек). Author не может выставить `published`.
+  - `POST /author/experiences/{id}/submit` — `draft`/`rejected → on_moderation`.
+    Валидирует обязательные поля (`title`, `full_description`, `city`,
+    `duration_minutes`, `price`) и наличие `points`. После повторного submit
+    отклонённое впечатление снова идёт на модерацию, причина очищается.
+- **Moderation (роль Moderator)**:
+  - `GET /moderation/queue` — только `on_moderation`.
+  - `POST /moderation/experiences/{id}/publish` — `on_moderation → published`.
+  - `POST /moderation/experiences/{id}/reject` — `on_moderation → rejected`,
+    требует `reason_code` + `reason_text`, причина сохраняется на experience.
+  - Повторный publish/reject для финального статуса → `400`.
+  - Решения фиксируются в таблице `moderation_decisions`.
+  - `GET /moderation/complaints`, `POST /moderation/complaints/{id}/resolve`
+    (`open → resolved`/`rejected`, требует `resolution_text`/`reason_text`,
+    повторная обработка → `400`).
+- **Complaints (роль User)**:
+  - `POST /complaints` — жалоба на `experience` (наличие experience проверяется).
+    Author/Moderator → `403`.
+
+### Аудит и аналитика
+
+- Модель `AuditLog` + helper `app/services/audit.py`. Аудируются
+  `author_experience_created/updated/submitted`, `moderation_publish`,
+  `moderation_reject`, `complaint_created`, `complaint_resolved`, а также
+  invalid-попытки publish/reject. В логи не пишутся JWT, пароли и
+  чувствительные пользовательские заметки.
+- Те же внутренние действия дополнительно фиксируются как `AnalyticsEvent`
+  (`source_app=backend`). У `analytics_events` добавлены `event_version`
+  (default `1`) и `occurred_at` (если клиент не передал — текущее время).
+
+### Catalog config / окно длительности
+
+`GET /catalog/config` расширен: `default_sort`, `max_page_size`, `source`,
+`priority_rules`, `showcase_priorities`, `supported_filters`, `version`,
+`time_window_hours` (`[2, 6]`). Порядок выдачи каталога серверный и
+воспроизводимый. Добавлен фильтр `time_window_hours` (верхняя граница в часах),
+не ломающий `min_duration_minutes`/`max_duration_minutes`.
+
+### Миграция
+
+Добавлена миграция
+`c7d2e9f4a1b8_add_moderation_complaints_audit`: таблицы
+`moderation_decisions`, `complaints`, `audit_logs`, поля
+`experiences.moderation_reason_code/text` и
+`analytics_events.event_version/occurred_at`. Применить:
+
+```bash
+alembic upgrade head
+```
+
+### Demo flow (Full TZ)
+
+```bash
+# Author: create draft -> edit -> submit
+ATOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"author@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+AAUTH="Authorization: Bearer $ATOKEN"
+
+EID=$(curl -s -X POST http://127.0.0.1:8000/author/experiences \
+  -H "$AAUTH" -H 'Content-Type: application/json' \
+  -d '{"title":"My exp","full_description":"full","city":"Москва","duration_minutes":180,"price":1500,"points":[{"title":"P1"},{"title":"P2"}]}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+curl -s -X PATCH http://127.0.0.1:8000/author/experiences/$EID \
+  -H "$AAUTH" -H 'Content-Type: application/json' -d '{"title":"My exp v2"}'
+curl -s -X POST http://127.0.0.1:8000/author/experiences/$EID/submit -H "$AAUTH"
+
+# Moderator: queue -> publish/reject
+MTOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"moderator@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+MAUTH="Authorization: Bearer $MTOKEN"
+
+curl -s -H "$MAUTH" http://127.0.0.1:8000/moderation/queue
+curl -s -X POST http://127.0.0.1:8000/moderation/experiences/$EID/publish -H "$MAUTH"
+# или reject:
+# curl -s -X POST http://127.0.0.1:8000/moderation/experiences/$EID/reject \
+#   -H "$MAUTH" -H 'Content-Type: application/json' \
+#   -d '{"reason_code":"content_quality","reason_text":"нужно доработать"}'
+
+# User complaint -> Moderator resolve
+UTOKEN=$(curl -s -X POST http://127.0.0.1:8000/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"user@test.com","password":"password"}' \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
+UAUTH="Authorization: Bearer $UTOKEN"
+
+CID=$(curl -s -X POST http://127.0.0.1:8000/complaints \
+  -H "$UAUTH" -H 'Content-Type: application/json' \
+  -d "{\"target_type\":\"experience\",\"target_id\":$EID,\"reason_code\":\"inappropriate\",\"reason_text\":\"...\"}" \
+  | python -c 'import sys,json;print(json.load(sys.stdin)["id"])')
+
+curl -s -H "$MAUTH" http://127.0.0.1:8000/moderation/complaints
+curl -s -X POST http://127.0.0.1:8000/moderation/complaints/$CID/resolve \
+  -H "$MAUTH" -H 'Content-Type: application/json' \
+  -d '{"status":"resolved","resolution_text":"обработано"}'
+```
+
+### Seed (Full TZ)
+
+`python -m app.db.seed` (идемпотентно) создаёт тех же пользователей и набор
+впечатлений: 3 published, 1 draft и 1 on_moderation для `author@test.com`,
+плюс 1 rejected с `moderation_reason_code/text` для проверки кабинета автора.
+
+## Вне MVP по ТЗ (future work)
+
 - Реальный payment provider (сейчас используется mock).
 - Frontend клиента.
 - ML-рекомендации.
-- Социальные фичи (фолловинг, шеринг и пр.).
+- Социальные / офлайн-карты, шеринг и пр.
+
+NFR проверяются в рамках MVP scope / локальных проверок:
+RBAC по ролям, серверная сортировка каталога, отсутствие
+JWT/паролей/чувствительных заметок в логах и аудите.
