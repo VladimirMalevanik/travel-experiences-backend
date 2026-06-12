@@ -8,3 +8,6 @@ from app.models.order import Order, PurchaseAccess  # noqa: F401
 from app.models.payment import PaymentWebhookEvent  # noqa: F401
 from app.models.review import Review  # noqa: F401
 from app.models.analytics import AnalyticsEvent  # noqa: F401
+from app.models.moderation import ModerationDecision  # noqa: F401
+from app.models.complaint import Complaint  # noqa: F401
+from app.models.audit import AuditLog  # noqa: F401

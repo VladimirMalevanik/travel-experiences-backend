@@ -21,6 +21,23 @@ logger = logging.getLogger("app.catalog")
 
 MAX_PAGE_SIZE = 50
 DEFAULT_SORT = ["city:asc", "duration_minutes:asc", "id:asc"]
+CATALOG_VERSION = 1
+# Окно длительности витрины по ТЗ: 2–6 часов.
+SHOWCASE_TIME_WINDOW_HOURS = [2, 6]
+PRIORITY_RULES = [
+    "status:published",
+    "city:asc",
+    "duration_minutes:asc",
+    "id:asc",
+]
+SUPPORTED_FILTERS = [
+    "city",
+    "min_duration_minutes",
+    "max_duration_minutes",
+    "time_window_hours",
+    "min_price",
+    "max_price",
+]
 
 
 @router.get("/catalog/experiences", response_model=ExperienceListResponse)
@@ -28,6 +45,7 @@ def list_catalog(
     city: Optional[str] = Query(default=None),
     min_duration_minutes: Optional[int] = Query(default=None, ge=0),
     max_duration_minutes: Optional[int] = Query(default=None, ge=0),
+    time_window_hours: Optional[int] = Query(default=None, ge=0),
     min_price: Optional[float] = Query(default=None, ge=0),
     max_price: Optional[float] = Query(default=None, ge=0),
     page: int = Query(default=1, ge=1),
@@ -35,6 +53,13 @@ def list_catalog(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> ExperienceListResponse:
+    # time_window_hours задаёт верхнюю границу длительности в минутах.
+    # Не ломает старые min/max_duration_minutes — комбинируется как доп. фильтр.
+    if time_window_hours is not None:
+        window_max = time_window_hours * 60
+        if max_duration_minutes is None or window_max < max_duration_minutes:
+            max_duration_minutes = window_max
+
     if (
         min_duration_minutes is not None
         and max_duration_minutes is not None
@@ -105,4 +130,9 @@ def catalog_config(
         default_sort=DEFAULT_SORT,
         max_page_size=MAX_PAGE_SIZE,
         source="server_config",
+        priority_rules=PRIORITY_RULES,
+        showcase_priorities=PRIORITY_RULES,
+        supported_filters=SUPPORTED_FILTERS,
+        version=CATALOG_VERSION,
+        time_window_hours=SHOWCASE_TIME_WINDOW_HOURS,
     )

@@ -34,6 +34,8 @@ class Experience(Base):
         default=ExperienceStatus.draft,
         index=True,
     )
+    moderation_reason_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    moderation_reason_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

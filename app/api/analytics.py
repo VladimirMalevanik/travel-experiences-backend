@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
-from collections import Counter
+from datetime import datetime, timezone
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Body, Depends, HTTPException, status
@@ -55,6 +55,9 @@ def ingest_events(
     events = _parse_events(body)
     rows: List[AnalyticsEvent] = []
     for evt in events:
+        # occurred_at: используем переданный клиентом timestamp
+        # (occurred_at или event_timestamp), иначе — текущее время.
+        occurred = evt.occurred_at or evt.event_timestamp or datetime.now(timezone.utc)
         rows.append(
             AnalyticsEvent(
                 event_name=evt.event_name,
@@ -63,6 +66,8 @@ def ingest_events(
                 source_app=evt.source_app,
                 entity_type=evt.entity_type,
                 entity_id=evt.entity_id,
+                event_version=evt.event_version,
+                occurred_at=occurred,
                 payload=json.dumps(evt.payload, ensure_ascii=False)
                 if evt.payload is not None
                 else None,

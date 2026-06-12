@@ -57,3 +57,8 @@ class CatalogConfigRead(BaseModel):
     default_sort: List[str]
     max_page_size: int
     source: str
+    priority_rules: List[str]
+    showcase_priorities: List[str]
+    supported_filters: List[str]
+    version: int
+    time_window_hours: Optional[List[int]] = None
